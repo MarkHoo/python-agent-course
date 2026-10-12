@@ -1,0 +1,119 @@
+# CNB 流水线：把「静态检查 + 类型 + 测试 + 手册质量」变成提交即验的硬门槛。
+# 设计要点：
+#   1. 只用一个 Python 3.12 镜像，避免多阶段镜像拉取拖慢反馈；
+#   2. 关卡按「快 → 慢」排序，失败即短路，最先暴露最便宜的问题；
+#   3. 全部离线可跑：测试内部强制 OFFLINE=1，不依赖任何 API Key 或中间件；
+#   4. 手册可动手性（走查代码量 / 真实输出 / 动手实验）也进 CI，防止文档回退成「知识点提要」。
+#
+# 三处踩过的坑，别再踩：
+#   - 镜像必须显式声明（docker.image）。默认 Runner 环境里没有 `python`，
+#     只写 script 会第一步就 `python: command not found`（退出码 127）。
+#   - 关卡用 `python -m <工具>` 调用，不依赖 PATH 上是否装了 console script。
+#   - 安装的 extras 必须覆盖「文档输出所依赖的可选库」。graph/storage 里的
+#     langgraph / neo4j / psycopg / redis / boto3 / aio-pika 都是**延迟导入**的：
+#     装了就真连（打印连接失败后的优雅降级），没装就走「未安装 XXX 驱动」分支。
+#     少装会让 ch26/30/34/35/38/40 的 README 输出块与实跑对不上（`make output` 变红）
+#     —— 这正是「我本地是绿的」的根源，别再从 `.[dev,rag,web]` 里减 extras。
+main:
+  push:
+    - docker:
+        image: python:3.12
+      stages:
+        - name: 安装依赖
+          script: |
+            set -e
+            python -m pip install --upgrade pip
+            python -m pip install -e ".[dev,rag,web,graph,storage]"
+        - name: ruff 检查与格式校验
+          script: |
+            set -e
+            python -m ruff check .
+            python -m ruff format --check .
+        - name: mypy 严格类型检查
+          script: |
+            set -e
+            python -m mypy src chapters tests tools site/tools
+        - name: pytest 全量测试
+          script: |
+            set -e
+            python -m pytest
+        - name: 手册可动手性（58 章 README 的走查/输出/实验）
+          script: |
+            set -e
+            python tools/check_readme_practice.py
+        - name: 动手实验（58 章 experiments.py 全跑 + 断言现象）
+          script: |
+            set -e
+            python tools/run_experiments.py
+        - name: 逐章冒烟（58 章全部入口实跑）
+          script: |
+            set -e
+            python tools/smoke_chapters.py
+        - name: 可复现性（同一入口两遍，输出必须一致）
+          script: |
+            set -e
+            python tools/check_reproducible.py
+        - name: 文档输出核对（README 的 run 块 == 真跑一遍）
+          script: |
+            set -e
+            python tools/check_readme_output.py
+        - name: 站点构建与验证（58 章静态站）
+          script: |
+            set -e
+            python site/tools/build_site.py
+            # verify_site.py 需要 Node 跑渲染/搜索/高亮的真实验证
+            if ! command -v node >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq nodejs
+            fi
+            python site/tools/verify_site.py
+  pull_request:
+    - docker:
+        image: python:3.12
+      stages:
+        - name: 安装依赖
+          script: |
+            set -e
+            python -m pip install --upgrade pip
+            python -m pip install -e ".[dev,rag,web,graph,storage]"
+        - name: ruff 检查与格式校验
+          script: |
+            set -e
+            python -m ruff check .
+            python -m ruff format --check .
+        - name: mypy 严格类型检查
+          script: |
+            set -e
+            python -m mypy src chapters tests tools site/tools
+        - name: pytest 全量测试
+          script: |
+            set -e
+            python -m pytest
+        - name: 手册可动手性（58 章 README 的走查/输出/实验）
+          script: |
+            set -e
+            python tools/check_readme_practice.py
+        - name: 动手实验（58 章 experiments.py 全跑 + 断言现象）
+          script: |
+            set -e
+            python tools/run_experiments.py
+        - name: 逐章冒烟（58 章全部入口实跑）
+          script: |
+            set -e
+            python tools/smoke_chapters.py
+        - name: 可复现性（同一入口两遍，输出必须一致）
+          script: |
+            set -e
+            python tools/check_reproducible.py
+        - name: 文档输出核对（README 的 run 块 == 真跑一遍）
+          script: |
+            set -e
+            python tools/check_readme_output.py
+        - name: 站点构建与验证（58 章静态站）
+          script: |
+            set -e
+            python site/tools/build_site.py
+            # verify_site.py 需要 Node 跑渲染/搜索/高亮的真实验证
+            if ! command -v node >/dev/null 2>&1; then
+              apt-get update -qq && apt-get install -y -qq nodejs
+            fi
+            python site/tools/verify_site.py

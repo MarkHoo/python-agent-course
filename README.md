@@ -1,0 +1,228 @@
+# AI Agent 全栈开发教程 · Python 版
+
+> 一套 **58 章、可独立完成**的 AI Agent 全栈开发教程，技术栈是
+> **Python 3.12 + LangChain Python + Pydantic v2 + asyncio**。
+>
+> 每一章都是「概念 → 可运行代码 → 工程取舍 → 回归验证」的完整闭环：
+> 类型注解、安全护栏、并发、可观测性、可测试性，一项都不省。
+> 全站**离线可跑**——没有 API Key、没有中间件也能把 79 个入口完整跑一遍。
+
+> 📖 **在线阅读**：`site/index.html` 是全书静态站（全文搜索 / 目录导航 / 代码高亮 / 深浅主题），
+> 双击即可打开，也可部署到任意静态托管。构建与部署见 [`site/README.md`](site/README.md)。
+
+## 58 章索引
+
+| 章 | 主题 | 目录 | 主要脚本 |
+| --- | --- | --- | --- |
+| 1 | 学员真实转型 Agent 成功经验：从故事到可执行的计划 | `chapters/ch01_transition_story/` | `learning_path`、`test_learning_path`、`transition_plan` |
+| 2 | 课程脉络梳理：58 章的一张可追踪地图 | `chapters/ch02_course_roadmap/` | `learning_path`、`roadmap`、`test_learning_path` |
+| 3 | AI Agent 开发要学什么：技能树、优先级与投入产出 | `chapters/ch03_what_to_learn/` | `learning_path`、`skill_tree`、`test_learning_path` |
+| 4 | 从 Tool 开始：让大模型自动调工具读文件 | `chapters/ch04_tool_basics/` | `agent_loop`、`file_tools`、`hello_langchain`、`tool_file_read` |
+| 5 | 实现 mini cursor：大模型自动调用 tool 执行命令 | `chapters/ch05_mini_cursor/` | `agent_tools`、`command_tools`、`mini_cursor`、`run_command`、`sandbox`、`test_sandbox` |
+| 6 | MCP：可跨进程调用的 Tool | `chapters/ch06_mcp_server/` | `mcp_server`、`protocol` |
+| 7 | 复用别人的 MCP Server：把工具生态接进你的 Agent | `chapters/ch07_reuse_mcp/` | `reuse_mcp` |
+| 8 | RAG：把文档向量化，基于向量实现真正的语义搜索 | `chapters/ch08_rag_vector/` | `embeddings`、`hello_rag`、`local_vector_store`、`vector_math` |
+| 9 | 知识库的 loader 和 splitter：从各种来源加载文档并分割成小块 | `chapters/ch09_loader_splitter/` | `loaders`、`pipeline`、`quality`、`splitters` |
+| 10 | LangChain 全部 Splitter，其实只需要其中的一个 | `chapters/ch10_splitter_deep/` | `auto_tune` |
+| 11 | 向量数据库 Milvus：做 AI Agent 开发必备技术 | `chapters/ch11_milvus/` | `milvus_lab` |
+| 12 | Milvus + RAG 实战：电子书语义检索助手 | `chapters/ch12_milvus_rag/` | `ebook_rag` |
+| 13 | Memory 管理的三大策略：截断、总结、检索 | `chapters/ch13_memory_strategy/` | `memory_policies` |
+| 14 | 结构化大模型输出：output parser 还是 tool？ | `chapters/ch14_structured_output/` | `demo_model`、`models`、`normal_json`、`parsers_compare`、`robust_parser`、`selection_matrix` |
+| 15 | Output Parser 实战：智能录入 + 流式版 mini cursor | `chapters/ch15_output_parser_practice/` | `friend_repo`、`friend_schema`、`partial_json`、`smart_import`、`streaming_model` |
+| 16 | Prompt Template：组件化管理 prompt | `chapters/ch16_prompt_template/` | `prompt_templates` |
+| 17 | Runnable：把写逻辑变成组装 chain | `chapters/ch17_runnable/` | `runnable_lab` |
+| 18 | 实战练习 LCEL 组装 chain | `chapters/ch18_lcel_practice/` | `lcel_practice` |
+| 19 | LangChain 整体总结：第一阶段学习完成 | `chapters/ch19_langchain_summary/` | `checklist` |
+| 20 | 基于 SSE 的流式 AI 接口 | `chapters/ch20_sse_stream/` | `app`、`client`、`demo_offline`、`events`、`serve`、`service` |
+| 21 | 定时任务（上）：调度器、cron 解析与持久化 | `chapters/ch21_cron_tool_part1/` | `scheduler` |
+| 22 | 定时任务（下）：把调度能力变成大模型可调用的 Tool | `chapters/ch22_cron_tool_part2/` | `cron_tools` |
+| 23 | 给 Agent 加上语音交互：ASR + 流式 TTS | `chapters/ch23_asr_tts/` | `voice_pipeline` |
+| 24 | AGUI 协议：流式组件渲染 | `chapters/ch24_agui_protocol/` | `agui_events` |
+| 25 | 图编排引擎：LangGraph 和多 Agent 架构 | `chapters/ch25_langgraph/` | `graph_lab` |
+| 26 | Agentic RAG：基于 LangGraph 实现大模型自主决策的 RAG 闭环系统 | `chapters/ch26_agentic_rag/` | `corpus`、`graph`、`naive_rag`、`nodes`、`retrievers`、`run_agentic_rag`、`state` |
+| 27 | 基于 Docker Compose 的本地开发提效和生产环境部署 | `chapters/ch27_docker_compose/` | `app_main`、`deploy_check` |
+| 28 | ElasticSearch 全文检索：倒排索引表 + IK 分词器 + BM25 算法 | `chapters/ch28_elasticsearch/` | `bm25_lab` |
+| 29 | 混合检索 RAG：多路召回 + 重排模型 | `chapters/ch29_hybrid_search/` | `hybrid_search` |
+| 30 | Neo4j 知识图谱和 Graph RAG | `chapters/ch30_neo4j_graphrag/` | `graphrag` |
+| 31 | LangSmith 全链路观测：从 Agent 调试到 RAG 量化评估 | `chapters/ch31_langsmith/` | `observability` |
+| 32 | DeepAgents：开箱即用的 skill、上下文压缩等 middleware | `chapters/ch32_deepagents/` | `middleware` |
+| 33 | DeepAgents 实战：多 Agent 架构的深度调研助手 | `chapters/ch33_deep_research/` | `deep_research` |
+| 34 | PostgreSQL：AI 时代最适合的数据库 | `chapters/ch34_postgresql/` | `pg_lab` |
+| 35 | Redis：实现 Agent 短期记忆存储的最佳方案 | `chapters/ch35_redis_memory/` | `redis_memory` |
+| 36 | Mem0：分层记忆 + 三路召回的长期记忆方案 | `chapters/ch36_mem0/` | `layered_memory` |
+| 37 | NestJS 进阶 → FastAPI 企业级后端骨架 | `chapters/ch37_fastapi_backend/` | `app` |
+| 38 | Agent 的对象存储方案：MinIO、RustFS、阿里云 OSS | `chapters/ch38_object_storage/` | `storage` |
+| 39 | 多模态与 OSS 前端直传实战：AI 画板 | `chapters/ch39_multimodal_upload/` | `direct_upload` |
+| 40 | RabbitMQ：Agent 中异步处理的标配方案 | `chapters/ch40_rabbitmq/` | `mq_pipeline` |
+| 41 | LangFuse：开源可内网部署的 Agent 全链路监测方案 | `chapters/ch41_langfuse/` | `tracer` |
+| 42 | 图解 Transformer 架构：大模型底层原理 | `chapters/ch42_transformer/` | `transformer` |
+| 43 | 训练与推理全流程：从损失曲线到 KV Cache | `chapters/ch43_training_inference/` | `inference`、`training` |
+| 44 | Agent 简历库：结构化简历模型、STAR 生成与 JD 匹配打分 | `chapters/ch44_resume_library/` | `resume_lab` |
+| 45 | Agent 简历库（二）：项目描述改写、能力雷达与面试追问预测 | `chapters/ch45_resume_library_2/` | `resume_lab_2` |
+| 46 | 面试题精讲（RAG 篇）：题库检索、答题模板与 rubric 评分 | `chapters/ch46_interview_rag/` | `interview_rag` |
+| 47 | 简历知识库 RAG 专场：把简历建成个人知识库并做定向问答 | `chapters/ch47_resume_rag/` | `resume_kb` |
+| 48 | 企业级知识库项目总览：模块划分、多模态 RAG 流程与技术选型 | `chapters/ch48_kb_project_intro/` | `overview` |
+| 49 | 文档模块数据库设计：PostgreSQL 关系表 + 文档型存储的分工 | `chapters/ch49_kb_database_design/` | `schema` |
+| 50 | 文档解析：PDF/XLSX/DOCX/PPTX → Markdown 与解析质量报告 | `chapters/ch50_document_parsing/` | `parsing` |
+| 51 | 异步 RAG 流水线：任务状态机、队列 worker 与进度事件 | `chapters/ch51_async_rag_pipeline/` | `pipeline` |
+| 52 | 全文检索链路：索引构建、检索、高亮与摘要片段生成 | `chapters/ch52_fulltext_search/` | `fulltext` |
+| 53 | 文档实体抽取入图：LLM 结构化抽取、实体归一与幂等写入 | `chapters/ch53_neo4j_extraction/` | `graph_extract` |
+| 54 | 文档审核机制：四状态流转、审核动作与审计日志 | `chapters/ch54_document_audit/` | `audit_flow` |
+| 55 | 用户鉴权流程：密码哈希、JWT 签发与刷新令牌轮换 | `chapters/ch55_auth_flow/` | `auth_flow` |
+| 56 | 用户模块：仓储层、资料维护、验证码限流与账号安全 | `chapters/ch56_user_module/` | `user_module` |
+| 57 | RBAC 权限系统：角色继承、权限判定与资源级鉴权 | `chapters/ch57_rbac/` | `rbac` |
+| 58 | 关键词高亮检索 + 图谱检索：命中位置、摘要片段与图邻域扩展 | `chapters/ch58_highlight_graph_search/` | `hybrid_search` |
+
+
+## 快速开始
+
+```bash
+cd python-agent-course
+
+# 1) 建虚拟环境（本机 Python 3.12.10）
+uv venv .venv --python 3.12
+# Windows 激活：.venv\Scripts\activate  ｜ macOS/Linux：source .venv/bin/activate
+
+# 2) 安装（清华源 403 时可换成 https://mirrors.aliyun.com/pypi/simple）
+uv pip install -e .
+uv pip install -e ".[rag,graph,web,storage,observability,documents,dev]"
+
+# 3) 配置密钥
+cp .env.example .env      # 填 OPENAI_API_KEY / OPENAI_BASE_URL
+
+# 4) 跑任意一章
+uv run python -m chapters.ch04_tool_basics.tool_file_read
+```
+
+> **没有 API Key 也能学**：`build_chat_model()` 在缺少密钥或 `OFFLINE=1` 时自动降级为
+> 离线 `EchoChatModel`，把链路完整跑通并把输入回显出来。
+
+## 目录结构
+
+```text
+python-agent-course/
+├── pyproject.toml          # uv / ruff / mypy / pytest 统一配置
+├── .env.example            # 配置模板（.env 不入库）
+├── src/agent_course/       # 公共库：配置、日志、模型工厂、工具沙箱、通用工具
+│   ├── config.py           # pydantic-settings 读取 .env
+│   ├── logging.py          # Rich 结构化日志
+│   ├── models.py           # LLM 工厂 + 离线降级模型
+│   ├── tools.py            # Workspace 沙箱：文件读写/列目录/命令执行
+│   └── utils.py            # token 计数、批处理、消息美化
+├── .cnb.yml                # CNB CI：ruff → format → mypy → pytest → 冒烟 → 可复现性
+├── Makefile                # make check / test / coverage / smoke / reproducible / fix
+├── chapters/               # 58 章，每章一个包：chNN_<slug>/README.md + 示例代码
+├── site/                   # 静态学习网站（58 章零依赖在线阅读，双击 site/index.html 即可）
+├── tests/                  # pytest 用例
+└── tools/
+    ├── smoke_chapters.py      # 58 章全部入口实跑一遍（make smoke）
+    └── check_reproducible.py  # 每个入口跑两遍，输出必须一致（make reproducible）
+```
+
+## 配套文档
+
+| 文档 | 讲什么 |
+| --- | --- |
+| `CHAPTER_GUIDE.md` | 单章的**写作规范**（9 个小节、代码要求、禁止事项） |
+| `ENGINEERING_BASELINE.md` | **全站工程质量基线**：七条跨章约定 + 规模与复现口径 + 常用替换库对照 |
+| `TROUBLESHOOTING.md` | 跨章 **FAQ / 术语表 / 排错手册**，含离线降级的逐章审计结果 |
+| `CONTRIBUTING.md` | **协作流程**：新增一章的 SOP、提交规范、验收清单 |
+| `CHANGELOG.md` | 版本变更记录 |
+
+## 全 project 遵循的 Python 规范
+
+| 维度 | 约定 |
+| --- | --- |
+| 版本 | Python ≥ 3.12（`dataclass(slots=True)`、`type` 语句、`asyncio.TaskGroup`） |
+| 类型 | 全量类型注解 + `from __future__ import annotations`，`mypy --strict` |
+| 配置 | `pydantic-settings` + `.env`，密钥用 `SecretStr`，绝不硬编码 |
+| 异步 | 一律 `async/await`；并发用 `asyncio.gather` / `TaskGroup`，不用裸线程 |
+| 数据模型 | Pydantic v2 `BaseModel` 定义工具入参与结构化输出 |
+| 风格 | `ruff check` + `ruff format`（行宽 110，规则覆盖 E/W/F/I/N/UP/B/C4/SIM/RUF/S/ANN） |
+| 日志 | `logging` + Rich，禁止用 `print` 打调试信息（示例输出除外） |
+| 入口 | 每脚本 `if __name__ == "__main__": asyncio.run(main())` |
+| 测试 | `pytest` + `pytest-asyncio`，外部依赖用 fake/mock 隔离 |
+
+校验命令（CI 里就跑这些，也可以一键 `make check`）：
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src chapters tests tools
+uv run pytest
+uv run python tools/smoke_chapters.py        # 79 个入口实跑一遍
+uv run python tools/run_experiments.py       # 动手实验：已迁移章全跑 + 断言现象（未迁移章列 TODO）
+uv run python tools/check_reproducible.py    # 每个入口跑两遍，输出必须一致
+```
+
+CI 配置见 `.cnb.yml`（push / PR 触发，六道关卡按「快 → 慢」排序，失败即短路）；
+提交前自动格式化见 `.pre-commit-config.yaml`（`pre-commit install` 启用）。
+
+## 测试
+
+**501 条用例**，全部离线、全部确定性（不联网、不等真实时间、不依赖随机结果）。
+选的是**最容易悄悄腐化**的那些不变量，而不是"能跑通就行"的冒烟：
+
+| 测试文件 | 守住的不变量 |
+| --- | --- |
+| `test_models.py` | 离线模型的剧本回放、`with_structured_output` 降级解析、非法 JSON 必须抛错 |
+| `test_agent_course_foundation.py` | **公共库地基**（`src/agent_course/`，被全部 58 章依赖）：`.env` 查找目录**绝不含文件系统根**（曾经的 `/.env` 会优先于仓库 `.env`，静默劫持配置）、文档承诺的「向上逐层查找」真的实现、`count_tokens` 在装/未装 `tiktoken` 两条路径上**空串都返回 0**、文件沙箱挡住 `../` 越界与软链逃逸 |
+| `test_ch04_agent_loop.py` | 工具循环的并发执行、单工具超时、异常回传、轮次兜底、消息不可变 |
+| `test_ch09_splitter_quality.py` | 切分器工厂、分位数插值、**实际重叠**与语义完整性评分 |
+| `test_ch17_runnable_timeout.py` | LCEL 的"超时真相"：`with_config(timeout=...)` **对自定义链不生效**（钉子测试）+ `timeout_guard` 真的会取消 |
+| `test_ch18_lcel_robustness.py` | ch18 链路的**重试/超时/降级**真的触发（用会失败/会变慢的假链走每条保护路径）+ 结构化解析失败必降级、绝不抛异常 |
+| `test_ch13_memory_policies.py` | 记忆策略三条硬约束：**不留悬空工具调用**（调用与结果成对）、**压缩结果真落进预算**、摘要随新增对话增量更新 |
+| `test_ch15_schema.py` | 字段清洗（性别/手机号/日期）、`validate_friends` 的坏行隔离 |
+| `test_ch25_graph_fallback.py` | LangGraph 缺失时的手写状态机与真图**逐条轨迹一致** |
+| `test_ch28_bm25.py` | 倒排索引幂等与清理、BM25 的 IDF 与长度归一化 |
+| `test_ch42_transformer.py` | softmax 数值稳定、因果掩码、注意力归一化、多头分化 |
+| `test_ch43_kv_cache.py` | **带 KV Cache 与不带缓存的生成结果必须逐 token 一致** |
+| `test_ch48_overview.py` | 模块依赖无环、无反向依赖、依赖名不拼错 |
+| `test_ch51_pipeline.py` | 状态机迁移表、重试上限与死信（异步用例） |
+| `test_ch52_fulltext.py` | 短语检索的相邻性、**高亮区间不错位** |
+| `test_ch54_audit.py` | 审核状态机：未列出的迁移一律拒绝、事件回放与状态一致 |
+| `test_ch55_auth.py` | 随机盐、令牌类型不可混用、refresh 重放检测与整族吊销 |
+| `test_ch57_rbac.py` | 角色继承、通配符匹配、租户隔离优先于一切 |
+| `test_cross_chapter_contracts.py` | **28 处跨章 import 的契约**（15 个上游 / 16 个下游），含元测试：未登记的依赖直接报错 |
+| `test_http_endpoints.py` | **真起 FastAPI 应用并打请求**：ch20 的 `/ai/chat`、`/ai/chat/stream` 必须 200（曾因注解 eval 失败恒定 500）；ch37 的 `/chat/stream` 必须被注册（曾 404）；参数校验必须返回 422 而非 500 |
+| `test_repo_consistency.py` | 文档一致性：根索引表标题 ↔ 章节 README H1 逐字一致、58 章 10 个小节齐备、README 里的 `-m chapters.x.y` 命令真实存在、`docker compose up <svc>` 的服务名真实存在、章节 import 的第三方包都已在 `pyproject.toml` 声明、**文档里的路径/命令/用例数/入口数都等于实测值**（数字漂移不再靠人眼盯） |
+| `test_repo_consistency.py`（文档输出核对 2 条） | 钉死 `make output` / CI 必须核对「README 的 `<!-- run: -->` 输出块 == 真跑一遍的输出」（此前只检查「有标记」，文档抄错没人管），且 `tools/check_readme_output.py` 的白名单条目不得残留死项 |
+| `test_repo_consistency.py`（新增 4 条） | 已升级章节的 `experiments.py` 必须导出标准契约（`build_experiments()` + `run_cli`）、README 的实验命令必须落在本章 `chapters.chNN_x.experiments` 上、`tools/run_experiments.py` 的发现规则与 `CHAPTER_GUIDE.md`、`agent_course.experiments.MIN_EXPERIMENTS` 三处一致 |
+| `test_ch34_40_real_clients.py` | **真实中间件客户端的故障语义**：ch34/35/38/40 的 Psycopg/Redis/S3/AMQP 实现**未连接时必须抛 `RuntimeError`**，绝不静默丢弃或返回伪造的空值（`[]`/`""`/`False`/`None`）——用本地环回 TCP 假服务真连，覆盖"服务没起"与"连上后挂掉"两种真实故障 |
+| `test_ch11_12_28_backend_contracts.py` | **后端选择的契约**：ch11 `build_milvus_backend()` 连不上必须返回 `None`（**绝不返回 `MilvusClient` 类**——那会让 `is None` 判断失效、降级分支变死代码）、`MilvusBackend` 与 `MemoryBackend` 同协议；ch12 `--backend milvus` 在真库可用时**必须真的写进去**，不可用时显式回退；ch28 `es_search()` 连接地址取自 `ELASTICSEARCH_URL`（不再硬编码）、连不上**以及缺客户端**都必须抛 `RuntimeError`（`[]` 只能表示「确实没命中」），且**任何一条失败路径的报错都要带出真正使用的地址**|
+| `test_determinism.py` | **可复现性**：源码里不得用内置 `hash()` 做 id/分桶（它随 `PYTHONHASHSEED` 变）—— `_job_id` / `hash_vector` 在不同进程必须给出**完全相同**的结果；ch15 清表后 `id` 必从 1 开始、ch05 `AuditLog.reset()` 后统计归零（否则 README 贴的输出只在第一次运行成立） |
+| `test_ch27_deploy.py` | 部署自检器本身不能误报：Dockerfile 续行合并（`HEALTHCHECK` 里的 `CMD` 不得冒充启动 CMD）、多阶段/非 root/健康检查基线、compose 服务名与文档一致 |
+
+合计 **501 条** = `tests/` 下 432 条 + `chapters/` 下 69 条练习用例（ch01/ch02/ch03/ch05），
+`pyproject.toml` 的 `testpaths = ["tests", "chapters"]` 保证两处都被收集——
+**此前遗漏了这个配置，那 69 条从未被执行过**。
+
+其中 `test_ch43_kv_cache.py`、`test_ch52_fulltext.py`、`test_models.py` 是**真实踩过的坑**写成的回归测试：
+KV-Cache 的 Decode 循环曾把固定输入喂给每一层（缓存"看着快、结果是错的"）；
+高亮曾因标题与正文分开算偏移导致整体平移；
+离线 `with_structured_output` 曾静默返回 `None`（链路"看似跑通、其实没入库"）。
+
+覆盖率（**两遍合并：pytest 跑测试 + `run_experiments` 跑 58 章实验**）：
+
+```bash
+make coverage        # 实测 72%（16925 行里覆盖 12221 行）
+```
+
+> 为什么不能只跑 `pytest --cov`：58 章的 `experiments.py` 有 **1.4 万行**，是全书最核心的
+> 可动手内容，但它们由 `tools/run_experiments.py` 在子进程里执行，**不在 pytest 的收集范围**。
+> 只跑 pytest 会把这 1.4 万行全部算成 0% 负债，报出一个 **32%** 的假数字——
+> 那是"没测到"，不是"没被测"。`make coverage` 用 `coverage run --parallel-mode` 让
+> 实验子进程把执行过的行并进同一个 `.coverage`，`coverage combine` 合并后才是真实覆盖率。
+
+## 学习路线
+
+1. **入门**（ch01–ch03）：方向感与学习地图。
+2. **工具与 MCP**（ch04–ch07）：Tool、mini cursor、MCP。
+3. **RAG 基础**（ch08–ch12）：向量化、切分、Milvus。
+4. **记忆与结构化输出**（ch13–ch15）。
+5. **Prompt / LCEL**（ch16–ch19）。
+6. **服务化**（ch20–ch24）：FastAPI 流式接口、定时任务、语音、AGUI。
+7. **LangGraph 与多 Agent**（ch25–ch26）。
+8. **基础设施**（ch27–ch41）：Docker、ES、PG、Redis、对象存储、消息队列、观测。
+9. **原理与求职**（ch42–ch47）：Transformer、训练推理、简历与面试题。
+10. **企业级项目实战**（ch48–ch58）：多模态知识库全链路。

@@ -1,0 +1,493 @@
+# 13 · Memory 管理的三大策略：截断、总结、检索
+
+> 这一章讲 Memory 管理的三大策略：**截断、总结、检索**。
+> 三种策略很容易被写成三个互不相通的脚本；本章把它们抽象成**同一个 Protocol 下的可组合实现**，
+> 并加入 **token 预算驱动**与**策略自动选择**。
+
+## 本章目标
+
+1. 理解对话历史为什么会失控（成本、窗口、注意力稀释）；
+2. 掌握三种策略的适用边界；
+3. 用统一的 `MemoryPolicy` 接口组合它们（先总结再截断、截断后仍可检索）；
+4. 学会按 token 预算自动选择策略。
+
+## 核心概念：三种策略的取舍
+
+```text
+              成本            信息保留          适用场景
+截断 Truncate  低（只留最近 N 轮）  低（早期信息丢失）   任务型短对话
+总结 Summary   中（要额外调一次模型）中（保留要点）      长对话、跨天任务
+检索 Retrieval 中（要嵌入+检索库）  高（按需取回）       长期记忆、知识型助手
+```
+
+真实系统几乎都是**组合**：最近 N 轮原文 + 更早内容的摘要 + 按需检索的长期记忆。
+
+## 环境准备
+
+```bash
+# 项目根目录，一次装齐核心依赖（langchain-core / pydantic / rich 等）
+uv venv .venv --python 3.12        # Windows: py -3.12 -m venv .venv
+uv pip install -e .
+cp .env.example .env               # 需要真实模型时填 OPENAI_API_KEY / OPENAI_BASE_URL
+```
+
+> **没有 API Key 也能跑**：`build_chat_model()` 在缺 Key 或 `OFFLINE=1` 时自动降级为离线
+> `EchoChatModel`，链路完整走一遍。测试与 CI 一律强制 `OFFLINE=1`。
+
+本章全是纯函数与内存实现，**不需要任何额外依赖或 Key**。
+
+## 代码走查：`memory_policies.py`
+
+### 1. 统一接口
+
+```python
+class MemoryPolicy(Protocol):
+    def apply(self, messages: Sequence[BaseMessage], *, budget: TokenBudget) -> list[BaseMessage]:
+        """把任意长的历史压缩到预算之内"""
+```
+
+三个实现 `TrimPolicy` / `SummaryPolicy` / `RetrievalPolicy` 都满足它，
+于是可以像中间件一样串联：`CompositePolicy([summary, trim])`。
+
+### 2. 预算用 dataclass 表达
+
+```python
+@dataclass(frozen=True, slots=True)
+class TokenBudget:
+    max_tokens: int = 2000
+    reserve_for_reply: int = 500
+    system_tokens: int = 200
+
+    @property
+    def available(self) -> int:
+        """历史消息真正可用的预算（下限 120，避免预算被扣成负数）。"""
+        return max(self.max_tokens - self.reserve_for_reply - self.system_tokens, 120)
+```
+
+预算 = 上下文上限 − 系统提示 − 预留给回答的部分。这是最容易被忽略、却最先炸掉线上服务的一条约束。
+`available` 那个 `max(..., 120)` 下限也有用：把 `max_tokens` 调到很小时，
+不设下限会算出负预算，后面所有 `<=0` 判断都会退化。
+
+### 3. 三种策略共用的"安全边界"
+
+裁剪起点由 `_clamp_to_budget()` 统一决定，**三个策略都走它**，因为它要同时保证四件事：
+
+```text
+① 预算内     剩余历史 token ≤ budget.available
+② 调用成对   被丢弃的区间里不得留下没有结果的 AIMessage(tool_calls=...)
+③ 开头是人   保留起点向前对齐到一条 HumanMessage，避免历史从"助手的半句话"开始
+④ 不做加法   连最后一条都压不进预算时保留它，而不是静默返回空历史
+```
+
+为什么 ② 必须扫**整段**被丢弃的区间、而不是只看被切掉的那一条：
+`AIMessage(tool_calls=...)` 和它的 `ToolMessage` 之间可能还夹着别的消息，
+一旦从中间切开，模型下一次调用就会直接报"缺少对应工具结果"。
+
+②③ 是两条相反方向的约束——避悬空要**往后**挪起点，对齐用户消息要**往前**挪，
+所以 `_clamp_to_budget` 让起点单调递增（只向后），否则循环会原地打转：
+
+```python
+def _clamp_to_budget(messages, *, budget, drop_before) -> list[BaseMessage]:
+    index = _align_start(messages, min(drop_before, len(messages) - 1))
+    while index < len(messages) - 1:
+        if _unresolved_tool_calls(messages[:index]) or _history_tokens(messages[index:]) > budget.available:
+            # 丢弃更多：先跳到下一条用户消息（_align_start 只会向后对齐，不会回退）
+            index = _align_start(messages, _next_human(messages, index))
+            continue
+        return list(messages[index:])
+    # 只剩一条也超预算：保留最后一条——让调用方看见超长，而不是静默交出空历史。
+    return [messages[-1]] if messages else []
+```
+
+`while index < len(messages) - 1` 是终止条件的关键：它保证循环只会把起点**向后**推，
+且一定能停。写"裁剪循环"时，最常见的 bug 就是起点可以来回移动 → 死循环。
+
+### 4. 总结策略要"增量"
+
+`SummaryPolicy.cache` 记的是 `(已覆盖消息条数, 摘要文本)`，不是摘要文本本身：
+
+```python
+covered, cached = self.cache.get("summary", (0, ""))
+fresh = self._summarize(older[covered:])  # 只总结新增的
+merged = "；".join(filter(None, (cached, fresh)))
+```
+
+用**条数**而不是文本比对当锚点，是因为文本可能"看起来没变"（摘要被截断了），
+条数才是可复现、可断言的信号。
+
+`SummaryPolicy.apply()` 的分工也很清楚——**先折叠旧内容成摘要，再把"摘要 + 最近原文"整体收尾**：
+
+```python
+def apply(self, messages, *, budget):
+    system, history = split_system(messages)
+    if _history_tokens(history) <= budget.available:
+        return ([system] if system else []) + history  # 没超预算就原样返回
+
+    cut = _align_start(history, len(history) - self.keep_recent_turns)  # 对齐到用户消息
+    older = _clamp_to_budget(history[:cut], budget=BIG, drop_before=0)  # 折叠部分也走安全边界
+    summary = self._summary_for(older)
+    ...
+    # 摘要 + 最近原文合起来仍可能超预算，统一再削一刀
+    return _clamp_to_budget(messages=prefix + list(recent), budget=budget, drop_before=0)
+```
+
+摘要的 token 记进 system 开销——这样"**摘要越长、留给原文的越少**"，
+不会被摘要自己反过来撑爆窗口。
+
+### 5. 检索策略：先削原文，再按剩余预算回灌
+
+顺序反了就会出问题——先把 `top_k` 塞满再收尾，"检索"自己就把上下文撑爆了。
+所以现在是：先把最近几轮削到安全边界，**扣掉系统提示与这部分的 token 之后**
+再看还能装几条：
+
+```python
+remaining = budget.available - used  # used = 系统提示 + 最近几轮
+for item in self._retrieve(older, query):
+    if cost > remaining:
+        break  # 装不下就停，永不超预算
+```
+
+另外查询词取**最近的用户发言**，而不是 `history[-1]`：后者通常是上一条 AI 回复，
+它跟历史高度同词，回灌回来的全是这句回复的复读。当前问题本身也不回灌——它已经在
+`recent` 里了。
+
+### 6. 自动选择
+
+```python
+def auto_policy(messages: Sequence[BaseMessage], *, budget: TokenBudget) -> MemoryPolicy:
+    """按对话规模自动选择策略。"""
+    turns = sum(1 for item in messages if isinstance(item, (HumanMessage, AIMessage)))
+    if turns <= 8:
+        return TrimPolicy()  # 短对话：截断最省
+    if turns <= 20:
+        return SummaryPolicy()  # 中等：总结保要点
+    return RetrievalPolicy()  # 很长：检索按需取回
+```
+
+### 7. 总结策略的增量缓存
+
+`SummaryPolicy` 的增量更新是本模块最考究的一段——它给"每轮都重算全部历史"止血：
+```python
+def _summary_for(self, older: Sequence[BaseMessage]) -> str:
+    """取覆盖 ``older`` 的摘要：缓存命中则**只总结新增部分**再拼接。"""
+    covered, cached = self.cache.get("summary", (0, ""))
+    if covered == len(older):
+        return cached
+    if covered > len(older):
+        # 历史被换了一批（缓存对不上），从头重算，避免把无关摘要拼进来。
+        covered, cached = 0, ""
+    fresh = self._summarize(older[covered:])
+    merged = "；".join(part for part in (cached, fresh) if part)
+    merged = truncate(merged, self.max_summary_tokens * 3)
+    self.cache["summary"] = (len(older), merged)
+    return merged
+```
+`covered > len(older)` 那条分支容易被忽略、却是必需的：历史可能被换过一批
+（比如用户开了新会话），此时缓存对不上，**必须从头重算**，否则会把上一段无关的摘要
+拼进这一段的开头。这类"缓存与数据不同源"的坑，几乎总在半年后以"摘要串味"的形式爆发。
+
+### 8. 检索策略：先削原文，再按剩余预算回灌
+
+`RetrievalPolicy` 的顺序最反直觉，但必须如此：
+```python
+def apply(self, messages: Sequence[BaseMessage], *, budget: TokenBudget) -> list[BaseMessage]:
+    """保留最近轮次 + 检索到的相关历史（回灌内容不含当前问题本身）。"""
+    system, history = split_system(messages)
+    head: list[BaseMessage] = [system] if system else []
+    if _history_tokens(history) <= budget.available:
+        return head + list(history)
+
+    # 最近几轮原文先削到安全边界：它在语义上是「当前正在聊的事」，比回灌的历史更重要。
+    cut = _align_start(history, len(history) - self.keep_recent_turns)
+    recent = _clamp_to_budget(messages=history, budget=budget, drop_before=cut)
+    kept_ids = {id(item) for item in recent}
+    older = [item for item in history if id(item) not in kept_ids]
+
+    query_text = self._query_text(history)
+    recalled = self._recall_within(
+        older,
+        query_text,
+        budget=budget,
+        used=_history_tokens(head) + _history_tokens(recent),
+    )
+    return head + recalled + recent
+```
+**先削原文、再算剩余预算**是关键：反过来的话（先塞满 `top_k` 再收尾），
+"检索"自己就成了超预算的来源。`_query_text` 取**最近的用户发言**——
+若用 `history[-1]`，它通常是上一条 AI 回复，跟历史高度同词，回灌回来的全是复读。
+
+### 7. 三种策略的骨架与工具函数
+
+`TrimPolicy` 是最容易理解的一个——但它的实现**不是简单的切片**，收尾全交给 `_clamp_to_budget`：
+```python
+@dataclass(slots=True)
+class TrimPolicy:
+    """截断策略：只保留最近若干轮，超出预算就丢最早的。"""
+
+    name: str = "truncate"
+    keep_recent_turns: int = 6
+
+    def apply(self, messages: Sequence[BaseMessage], *, budget: TokenBudget) -> list[BaseMessage]:
+        """按 token 预算从最早的消息开始丢弃（保留最近 ``keep_recent_turns`` 轮的起点）。"""
+        system, history = split_system(messages)
+        kept = _clamp_to_budget(messages=history, budget=budget, drop_before=self._turn_start(history))
+        result: list[BaseMessage] = [system] if system else []
+        result.extend(kept)
+        return result
+
+    def _turn_start(self, history: Sequence[BaseMessage]) -> int:
+        """最近 ``keep_recent_turns`` 轮的起点（向前对齐到对话轮次的边界）。"""
+        return _align_start(history, len(history) - self.keep_recent_turns)
+```
+`split_system` 把系统消息单独拎出来——**系统消息永远不参与裁剪**：
+```python
+def split_system(messages: Sequence[BaseMessage]) -> tuple[SystemMessage | None, list[BaseMessage]]:
+    """把系统消息与对话历史分开（系统消息不参与裁剪）。"""
+    if messages and isinstance(messages[0], SystemMessage):
+        return messages[0], list(messages[1:])
+    return None, list(messages)
+```
+而"悬空工具调用"的判定要**扫整段**，不是只看一条：
+```python
+def _unresolved_tool_calls(messages: Sequence[BaseMessage]) -> bool:
+    """这段消息里是否存在**没有结果**的工具调用。"""
+    ids: set[str] = set()
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            call_id = call.get("id") if isinstance(call, dict) else None
+            if isinstance(call_id, str):
+                ids.add(call_id)
+        call_id = getattr(message, "tool_call_id", None)
+        if isinstance(call_id, str):
+            ids.discard(call_id)
+    return bool(ids)
+```
+它把"发起的调用 id"收集起来、遇到对应的结果 id 就删掉，
+**最后还剩下 id = 有调用没结果**。判定的是整段区间的配平，
+因为 `AIMessage(tool_calls)` 和它的 `ToolMessage` 之间可能夹着别的消息，
+只看边界那一条会漏判。
+
+### 9. 实验入口
+
+把上面每个策略变成可执行、可断言的实验，入口在 `experiments.py`：
+```python
+def build_experiments() -> list[Experiment]:
+    """本章实验清单（README「动手实验」小节逐条对应）。"""
+    return [
+        Experiment(
+            name="三种策略都压进预算",
+            what="把同一段历史喂给截断/总结/检索三种策略，量各自由多少 token",
+            expect="三种都落在预算之内，且都显著小于原始历史",
+            run=exp1_all_policies_fit_budget,
+        ),
+        Experiment(
+            name="压缩率与保留内容的差异",
+            what="对比三者的压缩率，观察各保留了多少条与多少 token",
+            expect="三者量级接近，但保留的内容各不相同",
+            run=exp2_policies_trade_count_for_tokens,
+        ),
+        # …实验 3–6 见 experiments.py
+    ]
+
+
+EXPERIMENTS = build_experiments()
+
+
+def main() -> int:
+    """命令行入口：--list / --exp N / --all。"""
+    return run_cli(EXPERIMENTS, module=__name__)
+```
+
+## 运行
+
+```bash
+python -m chapters.ch13_memory_strategy.memory_policies
+```
+
+### 输出
+
+<!-- run: chapters.ch13_memory_strategy.memory_policies -->
+```text
+原始历史 26 条 / 526 token ｜ 预算 350
+
+truncate → 8 条 / 152 token （压缩到 29%）
+   · (system) 你是一个助手，回答要简洁。
+   · (user) 第 10 轮：我想问售后电话，订单号是 1009。
+   · (assistant) 关于售后电话，已为你处理，单号 1009 已记录。
+   · (user) 第 11 轮：我想问订单 1024 的退款进度，订单号是 1010。
+
+summary → 6 条 / 114 token （压缩到 22%）
+   · (system) 你是一个助手，回答要简洁。
+   · (user) 第 11 轮：我想问订单 1024 的退款进度，订单号是 1010。
+   · (assistant) 关于订单 1024 的退款进度，已为你处理，单号 1010 已记录。
+   · (user) 第 12 轮：我想问发票抬头怎么改，订单号是 1011。
+
+retrieval → 7 条 / 150 token （压缩到 29%）
+   · (system) 你是一个助手，回答要简洁。
+   · (system) 相关历史：第 1 轮：我想问订单 1024 的退款进度，订单号是 1000。
+   · (system) 相关历史：第 6 轮：我想问订单 1024 的退款进度，订单号是 1005。
+   · (system) 相关历史：第 11 轮：我想问订单 1024 的退款进度，订单号是 1010。
+
+自动选择 retrieval
+```
+
+**三种策略压到不同大小**（152 / 114 / 150 token），保留的内容也完全不同：
+
+- `truncate` 保的是**最近几轮原文**，更早的全丢；
+- `summary` 压得**最狠（114）**，但代价是要多调一次模型做摘要；
+- `retrieval` 把**相关的早期轮次**（第 1、6 轮都问过"订单 1024 退款"）以 system 消息形式回灌，
+  最近几轮也保留。
+
+最后一行 `自动选择 retrieval` 是因为 26 条历史的轮数已超过 20。
+
+## 动手实验
+
+三条策略到底差在哪，不靠"各有优劣"四个字，而是**同一段历史喂给三者、量出结果**：
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --list
+python -m chapters.ch13_memory_strategy.experiments --exp 1
+python -m chapters.ch13_memory_strategy.experiments --all
+```
+
+### 实验 1：三种策略都压进预算
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 1
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 把同一段历史喂给截断/总结/检索三种策略，量各自由多少 token |
+| 期望现象 | 三种都落在预算之内，且都显著小于原始历史 |
+| 实测 | 原始 526 token；截断 152 / 总结 114 / 检索 150，均 ≤ 350 预算 |
+
+**为什么**：**先守住的不变量是「不超预算」**，而不是"哪个压得更狠"。
+预算一旦被突破，无论压缩得多干净，模型侧都会直接报上下文超限。
+
+### 实验 2：压缩率与保留内容的差异
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 2
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 对比三者的压缩率，观察各保留了多少条与多少 token |
+| 期望现象 | 三者量级接近，但保留的内容各不相同 |
+| 实测 | 三者压缩率都 < 30%；总结压得最狠（114 token） |
+
+**为什么**：压到同一量级，但保留的东西完全不同——截断留最近原文，
+总结把早期折叠成摘要，检索按关键词捞回相关几条。**没有免费午餐**：
+总结每轮要（增量）调一次模型，检索要算一次相似度。
+
+### 实验 3：截断丢头部、检索能捞回
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 3
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 检查最早一轮的内容在截断结果与检索结果里是否还在 |
+| 期望现象 | 截断已丢弃、检索被捞回 |
+| 实测 | 含"第 1 轮"的消息：截断 **已被丢弃**；检索 **被捞回** |
+
+**为什么**：截断只会丢最早的消息——它是**单向**的；检索能把任意位置的相关历史**回灌**回来。
+这就是"长对话 + 需要记住开头"的场景要用检索的原因。
+
+### 实验 4：工具调用与结果保持配对
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 4
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 用带工具调用的历史跑截断，检查是否存在悬空调用 |
+| 期望现象 | 没有悬空工具调用（不会切在调用与结果之间） |
+| 实测 | 造了 6 组调用+结果，截断后剩 4 条，悬空调用 = **否** |
+
+**为什么**：如果只按"最近 N 条"裸切，正好切在 `AIMessage(tool_calls)` 与它的
+`ToolMessage` 之间，模型下一次请求会因"tool_call_id 找不到结果"直接报错——
+这类 bug 只在特定轮数下出现，最难查。
+
+### 实验 5：历史对齐到用户消息
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 5
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 检查三种策略裁剪后第一条非系统消息的角色 |
+| 期望现象 | 全部以 `user` 开头，不会出现助手半句话打头 |
+| 实测 | 截断/总结/检索的第一条非系统消息角色都是 `user` |
+
+**为什么**：`_align_start` 把保留起点**向前对齐到一条用户消息**。
+若历史以"助手的半句话"或"工具返回的裸数据"开头，模型容易顺势续写，
+产出与当前问题无关的内容——对齐到用户消息，是让模型知道"轮到谁说话"。
+
+### 实验 6：auto_policy 按规模选策略
+
+```bash
+python -m chapters.ch13_memory_strategy.experiments --exp 6
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 分别用 3 / 8 / 12 轮的对话（7 / 17 / 25 条消息）调 `auto_policy` |
+| 期望现象 | 依次选中 truncate / summary / retrieval |
+| 实测 | 7 条 → truncate；17 条 → summary；25 条 → retrieval |
+
+**为什么**：注意 `auto_policy` 数的是**消息条数**（Human + AI），不是"轮数"——
+分界点在 8 条与 20 条。这三条阈值是你自己的工程判断，不是定律：
+换业务、换模型上下文窗口，分界点都要重调。`auto_policy` 给的是一个**可改的起点**。
+
+## 本章的工程化取舍
+
+| 常见做法 | 本章做法 | 收益 |
+| --- | --- | --- |
+| 三个独立脚本 | 统一 `MemoryPolicy` 协议 + 可组合 | 能混用、能替换、能单测 |
+| 固定"保留最近 N 条" | `TokenBudget` 预算驱动 | 真正按成本裁剪 |
+| 只有截断做了边界保护 | `_clamp_to_budget()` 三个策略共用 | 总结/检索也不会切出悬空 tool_call |
+| 总结是一次性脚本 | `SummaryPolicy` 按"已覆盖条数"增量更新 | 不用每轮重算全部历史，且新增对话真的进摘要 |
+| 摘要不计入预算 | 摘要 token 记进 system 开销 | "摘要 + 最近原文"不会反过来撑爆窗口 |
+| 先塞满 top_k 再收尾 | 先削原文、再按剩余预算回灌 | 检索不会把上下文撑爆 |
+| 用 `history[-1]` 当查询词 | 取最近的用户发言 | 不回灌上一条 AI 回复的复读 |
+| 无自动选择 | `auto_policy()` 按规模推荐 | 不用自己判断用哪个 |
+
+## 最佳实践清单
+
+- **先算预算再裁剪**：`预算 = 窗口 − 系统提示 − 预留回答`。
+- **截断要在安全边界**：用户/AI 成对，工具调用与结果配对。
+- **摘要要增量**：缓存已有摘要，只把新增对话喂给模型。
+- **检索用作补充**：最近几轮原文永远保留，检索只补更早的相关内容。
+- **记录裁剪指标**：被丢弃的轮数、压缩率，异常时好排查。
+
+## 常见坑
+
+1. **截断留下悬空的 `tool_calls`**：模型会报"缺少对应 tool 结果"。
+   注意"只看被切掉的那一条"是不够的——要扫**整段被丢弃的区间**。
+2. **摘要把关键数字弄丢**：金额、id、日期要在提示词里要求原样保留。
+3. **检索回灌过多**：比不检索还容易跑偏，一般 k ≤ 5；
+   更要紧的是**先算剩余预算再回灌**，否则检索本身就把窗口撑爆。
+4. **预算没扣系统提示与摘要**：实际超窗口才发现。
+5. **只对一种策略做边界保护**：三种策略共用一份收尾逻辑，否则总结/检索会悄悄切出非法历史。
+6. **把单条超长消息整段丢掉**：历史变成空的，调用方以为模型失忆；
+   宁可保留超长的那一条（确定性报错），也不要静默清空。
+
+上述每一条都有回归测试钉住：`tests/test_ch13_memory_policies.py`（32 例）。
+
+## 延伸练习
+
+1. 实现 `CompositePolicy([summary, trim])`，观察两种顺序的差异。
+2. 把 `SummaryPolicy.max_summary_tokens` 调到很小，观察摘要被截断后
+   "关键数字丢失"的后果，再写一条测试把必须保留的字段钉住。
+3. 把检索后端换成 Redis（第 35 章），实现跨会话记忆。
+
+## 小结
+
+Memory 的本质是**在预算内保留最相关的信息**：
+截断保最近、总结保要点、检索保长期。三者不是三选一，而是按需组合。
+下一章进入结构化输出：如何让模型稳定吐出可解析的数据。

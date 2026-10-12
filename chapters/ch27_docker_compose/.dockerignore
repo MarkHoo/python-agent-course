@@ -1,0 +1,22 @@
+# 避免把本机垃圾打进镜像：构建上下文越小，构建越快
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache*/
+.ruff_cache/
+.pytest_cache/
+.git/
+.gitignore
+.env
+.env.*
+!.env.*.example
+tests/
+volumes/
+workspace/
+dist/
+build/
+assets/
+*.mp4
+*.png
+*.jpg

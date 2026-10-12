@@ -1,0 +1,223 @@
+[project]
+name = "python-agent-course"
+version = "0.1.0"
+description = "AI Agent 全栈开发教程 · Python 版（58 章）"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+  "langchain-core>=0.3.0",
+  "langchain-openai>=0.2.0",
+  "langchain-text-splitters>=0.3.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.5.0",
+  # ch14 的 XMLOutputParser 依赖 defusedxml；langchain-core 只把它当可选依赖，
+  # 不显式安装时 ch14「方案 5」会直接 ImportError。
+  "defusedxml>=0.7.1",
+  "python-dotenv>=1.0.1",
+  "rich>=13.9.0",
+  "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+# RAG / 向量检索
+rag = [
+  "tiktoken>=0.8.0",
+  "pymilvus>=2.4.0",
+  "rank-bm25>=0.2.2",
+  "numpy>=2.0.0",
+]
+# LangGraph / 多 Agent
+graph = [
+  "langgraph>=0.2.0",
+  "neo4j>=5.28.0",
+]
+# 后端服务（FastAPI 替代 NestJS）
+web = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "sse-starlette>=2.2.0",
+  "python-multipart>=0.0.20",
+  # ch20 流式客户端（client.py）默认用 httpx；此前是"恰好被别的包带着装了"的隐式依赖。
+  "httpx>=0.27.0",
+]
+# 存储与中间件
+storage = [
+  "psycopg[binary,pool]>=3.2.0",
+  "sqlalchemy>=2.0.36",
+  "redis>=5.2.0",
+  "elasticsearch>=8.16.0",
+  "aio-pika>=9.5.0",
+  "minio>=7.2.0",
+  "motor>=3.6.0",
+  # ch38 的 S3/MinIO 后端走 boto3（延迟导入）；只装 minio 的话真连时会提示缺 boto3。
+  "boto3>=1.35.0",
+]
+# 可观测性
+observability = [
+  "langsmith>=0.2.0",
+  "langfuse>=2.57.0",
+]
+# 文档解析与多模态
+documents = [
+  "pypdf>=5.1.0",
+  "python-docx>=1.1.2",
+  "openpyxl>=3.1.5",
+  "python-pptx>=1.0.2",
+  "markdownify>=0.14.1",
+]
+# 开发工具链
+dev = [
+  "mypy>=1.13.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  # make coverage 需要：pytest-cov 出报告，coverage 供 run_experiments --cov 合并实验执行数据。
+  "pytest-cov>=6.0.0",
+  "coverage>=7.6.0",
+  # 固定 ruff 版本：格式化结果随版本变，不锁会让"本地绿、CI 红"。
+  "ruff==0.16.10",
+  # ch27 的 deploy_check 用 PyYAML 结构化解析 compose；缺了会跳过该项检查。
+  # 它一直在 dev extra 里（本轮核对：此前 CHANGELOG 写的"从未声明"是错的）。
+  "pyyaml>=6.0.2",
+]
+
+[dependency-groups]
+dev = ["mypy>=1.13.0", "pytest>=8.3.0", "pytest-asyncio>=0.24.0", "pytest-cov>=6.0.0", "coverage>=7.6.0", "ruff==0.16.10", "pyyaml>=6.0.2"]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_course"]
+
+# ---------------------------------------------------------------- ruff ----
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "chapters", "tests", "tools", "site/tools"]
+extend-exclude = [".venv", "dist"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle 错误
+  "W",    # pycodestyle 警告
+  "F",    # pyflakes
+  "I",    # isort：import 排序
+  "N",    # pep8-naming
+  "UP",   # pyupgrade：现代语法
+  "B",    # flake8-bugbear
+  "C4",   # 推导式
+  "SIM",  # 简化
+  "RUF",  # ruff 特有规则
+  "S",    # bandit 安全
+  "ANN",  # 类型注解（教学代码要求显式标注）
+]
+ignore = [
+  "ANN401", # 教学示例允许 Any
+  "S101",   # assert 在测试与示例中常见
+  "S603",   # subprocess 调用是本课程主题之一
+  "S607",   # 同上：起子进程
+  "B008",   # 函数默认参数里做依赖注入（Typer/FastAPI 风格）
+  # 中文教程：注释与文档字符串里必然出现全角标点，不做 ASCII 化要求
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  "RUF012", # pydantic 字段的可变默认值由框架深拷贝，安全
+  "UP046",  # 教学代码统一用经典 TypeVar，降低阅读门槛
+  "UP047",  # 同上：泛型类的写法保持一致
+]
+
+[tool.ruff.lint.per-file-ignores]
+"chapters/**" = ["T201"]      # 教学脚本允许 print 输出演示结果
+"tests/**"   = ["ANN", "S"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_course"]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = true
+
+# ---------------------------------------------------------------- mypy ---
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+exclude = ["chapters/.*/assets"]
+
+[[tool.mypy.overrides]]
+module = [
+  "langchain.*",
+  "langgraph.*",
+  "pymilvus.*",
+  "neo4j.*",
+  "elasticsearch.*",
+  "yaml.*",
+  "apscheduler.*",
+  "mcp.*",
+  # 以下为「可选中间件」驱动：未安装时章节脚本会走内存降级实现
+  "psycopg.*",
+  "psycopg_pool.*",
+  "sqlalchemy.*",
+  "redis.*",
+  "aio_pika.*",
+  "aiohttp.*",
+  "boto3.*",
+  "botocore.*",
+  "minio.*",
+  "langfuse.*",
+  "langsmith.*",
+  "mem0.*",
+  "fastapi.*",
+  "starlette.*",
+  "uvicorn.*",
+  "passlib.*",
+  "jose.*",
+  "jwt.*",
+  "fitz.*",
+  "docx.*",
+  "pptx.*",
+  "openpyxl.*",
+  # 第 50 章文档解析的可选解析库
+  "pypdf.*",
+  "pdfplumber.*",
+  "pypdfium2.*",
+]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------- pytest ---
+[tool.pytest.ini_options]
+# chapters/ 下也有练习用的 pytest 用例（ch01/ch02/ch03/ch05 共 69 例）。
+# 只写 ["tests"] 会让它们永远不被收集——"85 passed" 曾经是假绿，现已修正。
+testpaths = ["tests", "chapters"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+# 覆盖率只度量「有意义的代码」：公共库 + 章节实现。
+# 排除 __main__ 入口的 demo 打印块，避免把"示例输出"算成负债。
+#
+# 注意：单跑 `pytest --cov` 会报出 32% 的假数字——58 章的 experiments.py（约 1.4 万行）
+# 由 tools/run_experiments.py 在子进程执行，不在 pytest 收集范围。`make coverage`
+# 用 `run_experiments --cov`（coverage run --parallel-mode）把实验执行数据并进同一份
+# .coverage，combine 后才是真实覆盖率（实测 72%）。
+source = ["src", "chapters"]
+omit = ["*/__init__.py", "tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+]

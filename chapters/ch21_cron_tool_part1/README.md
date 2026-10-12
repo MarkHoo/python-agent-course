@@ -1,0 +1,492 @@
+# 21 · 定时任务（上）：调度器、cron 解析与持久化
+
+> 这一章用框架自带的调度装饰器做定时任务，是「定时任务」的上半篇。
+> 本章改为**自研调度器**：把 cron 解析、持久化、并发执行、幂等与失败重试都讲清楚，
+> 因为下一章要把这些能力包装成大模型可调用的 Tool——不理解内部机制就没法设计好工具边界。
+
+## 本章目标
+
+1. 理解 cron 表达式的解析（5 字段、`*/n`、范围、枚举）；
+2. 实现一个可持久化的任务存储（JSON，可换成数据库）；
+3. 掌握调度循环的要点：tick 间隔、并发执行、超时、幂等；
+4. 为下一章"把调度变成 Tool"打好基础。
+
+## 核心概念：调度器的四块
+
+```text
+解析器 cron ──► 判断"这一分钟该不该跑"
+存储器 store ──► 任务持久化（重启不丢）
+调度器 loop ──► 每秒 tick，命中就投递执行
+执行器 run  ──► 并发、超时、重试、记录结果
+```
+
+| 组件 | 关键设计 | 常见坑 |
+| --- | --- | --- |
+| cron 解析 | 每字段独立匹配，全部命中才执行 | 时区、周字段 0/7 |
+| 持久化 | 原子写（临时文件 + rename） | 写一半崩溃导致任务丢失 |
+| 调度循环 | 用 `asyncio.sleep` 对齐到整秒 | 忙等空转烧 CPU |
+| 执行 | `asyncio.gather` + 单任务超时 | 一个慢任务拖垮整轮 |
+
+## 环境准备
+
+```bash
+# 项目根目录，一次装齐核心依赖（langchain-core / pydantic / rich 等）
+uv venv .venv --python 3.12        # Windows: py -3.12 -m venv .venv
+uv pip install -e .
+cp .env.example .env               # 需要真实模型时填 OPENAI_API_KEY / OPENAI_BASE_URL
+```
+
+> **没有 API Key 也能跑**：`build_chat_model()` 在缺 Key 或 `OFFLINE=1` 时自动降级为离线
+> `EchoChatModel`，链路完整走一遍。测试与 CI 一律强制 `OFFLINE=1`。
+
+本章只用标准库 `asyncio` 自研调度器，**不需要额外依赖或 Key**。
+
+## 代码走查：`scheduler.py`
+
+### 1. cron 解析：字段独立匹配，全部命中才执行
+
+```python
+@dataclass(frozen=True, slots=True)
+class CronExpr:
+    """五字段 cron：分 时 日 月 周。"""
+
+    minute: CronField
+    hour: CronField
+    day_of_month: CronField
+    month: CronField
+    day_of_week: CronField
+
+    @classmethod
+    def parse(cls, expression: str) -> CronExpr:
+        parts = expression.split()
+        if len(parts) != 5:
+            msg = f"cron 需要 5 个字段（分 时 日 月 周），收到 {len(parts)} 个：{expression!r}"
+            raise CronError(msg)
+        minute, hour, dom, month, dow = parts
+        return cls(
+            minute=CronField.parse(minute, minimum=0, maximum=59),
+            hour=CronField.parse(hour, minimum=0, maximum=23),
+            day_of_month=CronField.parse(dom, minimum=1, maximum=31),
+            month=CronField.parse(month, minimum=1, maximum=12),
+            day_of_week=CronField.parse(dow.replace("7", "0"), minimum=0, maximum=6),
+        )
+```
+
+字段解析支持 `*`、`*/n`、`1-5`、`1,3,5`。注意 `dow.replace("7", "0")`——
+**周字段 0 与 7 都是周日**，为什么不兼容这一条就会在某些平台上"周日任务不跑"？
+因为各 cron 实现对该字段的取值约定并不统一，显式归一化是代价最低的兼容方式。
+`matches()` 要求五个字段**全部命中**才算到期：
+
+```python
+def matches(self, moment: datetime) -> bool:
+    """判断某时刻是否命中。"""
+    return (
+        self.minute.matches(moment.minute)
+        and self.hour.matches(moment.hour)
+        and self.day_of_month.matches(moment.day)
+        and self.month.matches(moment.month)
+        and self.day_of_week.matches(moment.weekday() % 7)
+    )
+```
+
+`describe()` 把解析结果打印成人话（输出里的 `分钟 [0]｜小时 [9]｜周 [0..6]` 就是它）；
+为什么要有它：调试定时任务时你最先想知道的是"我这条表达式到底什么时候会跑"，
+人话描述比数字集合直观一个量级。
+
+### 2. 任务模型与持久化
+
+```python
+@dataclass(slots=True)
+class Job:
+    """一个定时任务。"""
+
+    id: str
+    name: str
+    cron: str
+    action: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    last_run: str | None = None
+    last_status: str = "never"
+    last_error: str = ""
+    run_count: int = 0
+```
+
+`JsonJobStore` 用"写临时文件 + `os.replace`"实现原子写——这是单机持久化的最低成本正确做法。
+为什么不能直接 `write_text`：否则写到一半进程被杀，磁盘上就是半截 JSON，回读直接崩，
+**等于一次崩溃丢掉全部任务**；`os.replace` 的原子性正是为了防这个。
+
+```python
+def save(self, jobs: list[Job]) -> None:
+    """原子写入（临时文件 + os.replace）。"""
+    tmp = self.path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps([asdict(job) for job in jobs], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, self.path)
+```
+
+> 这里是本章修过的一个真实缺陷：`Job` 里加了一个运行时字段后，`asdict(job)` 会把它
+> 一起序列化，`json.dumps` 在**不是 JSON 可编码类型**时直接 `TypeError` 崩溃。
+> **运行态字段漏进持久化，崩溃点离改动点很远**——这正是"持久化要有显式字段清单"的理由。
+
+### 3. 调度循环与分钟级幂等
+
+```python
+async def run_due(self, moment: datetime | None = None) -> list[str]:
+    """执行当前时刻到期的任务，返回执行结果列表。"""
+    now = moment or datetime.now()
+    due_jobs: list[Job] = []
+    for job in self.store.load_all():
+        if not job.enabled:
+            continue
+        expr = CronExpr.parse(job.cron)
+        if expr.matches(now) and job.last_run != now.strftime("%Y-%m-%d %H:%M"):
+            due_jobs.append(job)
+
+    async def execute(job: Job) -> str:
+        async with self._semaphore:
+            return await self._run_one(job, now)
+
+    return list(await asyncio.gather(*(execute(job) for job in due_jobs)))
+```
+
+`job.last_run != now.strftime("%Y-%m-%d %H:%M")` 就是**分钟级幂等**：
+同一分钟内不重复执行（重启、tick 抖动都不怕）。
+`run_due(moment=...)` 允许**注入时刻**，所以演示可以"用构造时刻验证调度，不用真的等一天"。
+
+### 4. 单任务隔离：超时、异常都不拖垮整轮
+
+```python
+async def _run_one(self, job: Job, now: datetime) -> str:
+    """执行单个任务并更新状态。"""
+    handler = self.handlers.get(job.action)
+    if handler is None:
+        job.last_status = "failed"
+        job.last_error = f"未注册的动作：{job.action}"
+    else:
+        try:
+            output = await asyncio.wait_for(handler(job), timeout=self.timeout)
+            job.last_status = "ok"
+            job.run_count += 1
+            result = f"{job.name} → {output}"
+        except TimeoutError:
+            job.last_status = "timeout"
+            job.last_error = f"超过 {self.timeout}s"
+        except Exception as exc:  # 单个任务失败不影响其它任务
+            job.last_status = "failed"
+            job.last_error = str(exc)
+    job.last_run = stamp
+    self.store.upsert(job)
+```
+
+三层状态（`last_run` / `last_status` / `last_error`）就是"可观测"的最小集：
+任务没跑、跑了超时、跑了报错，一眼能分辨。为什么值得为此多存三个字段：
+调度器出问题时，你最先要回答的就是"它到底跑没跑"，没有状态就只能靠猜。
+
+### 5. `experiments.py` —— 把「不重、不丢、可观测」变成可断言的事实
+
+前四节讲了机制，这一节把机制跑成事实。`experiments.py` 是本章所有动手实验的唯一入口，
+它不重复 `scheduler.py` 的演示，而是**逐条验证那些"读代码看不出来"的语义**：
+
+```python
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+from agent_course.experiments import Experiment, ExperimentOutcome, run_cli
+
+from .scheduler import CronError, CronExpr, Job, JsonJobStore, Scheduler
+
+MOMENT = datetime(2026, 10, 2, 9, 0)  # 2026-10-02 是周五
+
+
+def _temp_store() -> JsonJobStore:
+    """每个实验用独立临时目录，互不污染、不留垃圾。"""
+    return JsonJobStore(Path(tempfile.mkdtemp()) / "jobs.json")
+```
+
+有了 `_temp_store()`，实验就能"真的落盘"却不污染仓库；有了 `MOMENT`，就能"真的调度"
+却不用等到 9:00——这两点是可测性的全部前提。
+
+幂等实验直接对同一时刻触发两次：
+
+```python
+async def exp3_minute_idempotency() -> ExperimentOutcome:
+    async def ping(job: Job) -> str:
+        return f"ping:{job.name}"
+
+    store = _temp_store()
+    store.upsert(Job(id="j1", name="整点心跳", cron="0 9 * * *", action="ping"))
+    scheduler = Scheduler(store=store, handlers={"ping": ping})
+    first = await scheduler.run_due(MOMENT)
+    second = await scheduler.run_due(MOMENT)
+    job = store.get("j1")
+    return ExperimentOutcome(
+        actual=f"第一次 {first}；第二次 {second or '（空）'}；run_count={job.run_count}",
+        ok=len(first) == 1 and second == [] and job.run_count == 1,
+    )
+```
+
+隔离实验则用一个"睡 5 秒"的 handler 去撞 `timeout=0.2s`：
+
+```python
+async def exp5_timeout_isolation() -> ExperimentOutcome:
+    async def slow(_job: Job) -> str:
+        await asyncio.sleep(5)
+        return "永远不会来"
+
+    async def fast(_job: Job) -> str:
+        return "done"
+
+    store = _temp_store()
+    store.upsert(Job(id="slow", name="慢任务", cron="* * * * *", action="slow"))
+    store.upsert(Job(id="fast", name="快任务", cron="* * * * *", action="fast"))
+    scheduler = Scheduler(store=store, handlers={"slow": slow, "fast": fast}, timeout=0.2)
+    await scheduler.run_due(MOMENT)
+    # 期望：慢任务 timeout、快任务 ok —— 一个卡死不影响另一个
+```
+
+为什么值得为调度器单独写实验台：它的 bug **全部是"时间语义"bug**——
+同一分钟跑两次、一个慢任务拖垮整轮、并发峰值失控。这些都能被"注入时刻 + 注入慢 handler"
+变成确定性的断言，于是 CI 每次都能替你把它们挡住。
+
+## 运行
+
+```bash
+cd python-agent-course
+uv run python -m chapters.ch21_cron_tool_part1.scheduler            # 默认跑 90 秒
+uv run python -m chapters.ch21_cron_tool_part1.scheduler --ticks 30 # 快速演示
+```
+
+> 纯标准库 `asyncio` 自研调度器，不需要额外依赖，也不需要 Key。
+
+### 输出
+
+<!-- run: chapters.ch21_cron_tool_part1.scheduler -->
+```text
+已注册任务
+  · 整点心跳（0 * * * *）→ 分钟 [0]｜小时 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]｜周 [0, 1, 2, 3, 4, 5, 6]
+  · 每日报表（0 9 * * *）→ 分钟 [0]｜小时 [9]｜周 [0, 1, 2, 3, 4, 5, 6]
+
+用构造时刻验证调度（不用真的等一天）
+           INFO     任务执行：每日报表（ok）
+  时刻 2026-10-02 09:00 → ['整点心跳 → ping at 00:01:35（payload={}）', '每日报表 → 生成报表：daily']
+
+幂等验证：同一分钟再触发一次
+  结果：（空：同一分钟不重复执行 ✓）
+
+真实 tick（可选，--ticks 秒）
+
+任务状态
+  · 整点心跳: ok（第 1 次，2026-10-02 09:00）
+  · 每日报表: ok（第 1 次，2026-10-02 09:00）
+```
+
+三处值得注意：
+
+- **`用构造时刻验证调度`**：`run_due(moment=datetime(2026,10,2,9,0))` 直接验证
+  "09:00 这一刻该跑哪些任务"，不用真的等一天。可注入的时刻是可测性的前提。
+- **`时刻 ... → ['整点心跳 ...', '每日报表 ...']`**：两个任务在 09:00 同时命中——
+  `0 * * * *`（每小时第 0 分）和 `0 9 * * *`（每天 9:00）在这一刻重叠，都被调度。
+- **`幂等验证：同一分钟再触发一次 →（空）`**：第二次调用返回空列表，
+  因为两个任务的 `last_run` 已经是 `2026-10-02 09:00`。**重复触发被幂等地挡掉了。**
+
+### 输出 · `experiments`
+
+一行命令看结论（`--summary`）：
+
+```bash
+uv run python -m chapters.ch21_cron_tool_part1.experiments --summary
+```
+
+<!-- run: chapters.ch21_cron_tool_part1.experiments -->
+```text
+共 7 个实验，断言通过 7，失败 0
+
+[1] cron 五字段全命中才到期（并暴露周字段错位） → 断言通过（hit=1，fri=1，sat=1，sun=0，sunday_rule_hits=0）
+[2] 非法 cron 逐条被拦下                       → 断言通过（rejected=5）
+[3] 分钟级幂等                                 → 断言通过（first=1，second=0，run_count=1）
+[4] 持久化原子写不留残留                       → 断言通过（files=1，jobs=2）
+[5] 慢任务超时不拖垮整轮                       → 断言通过（slow=1）
+[6] 并发上限压住瞬时并行                       → 断言通过（peak=2，completed=6）
+[7] 三层状态可观测且落盘                       → 断言通过（keys=10）
+```
+
+## 动手实验
+
+每条实验都是**一条命令 + 实测现象**：跑 `python -m chapters.ch21_cron_tool_part1.experiments --exp N`
+就能自己看到，不用改文件。想看全部，用 `--all`。
+
+### 实验 1：cron 五字段全命中才到期（并暴露周字段错位）
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 1
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 用 `0 9 * * *` 与 `1-5` 分别匹配 09:00/09:01 与周五~周日 |
+| 期望现象 | 09:00 命中、09:01 不命中；并看到周字段的真实错位 |
+| 实测 | `0 9 * * *`：09:00→True、09:01→False；`1-5` 命中周五/周六、不命中周日 |
+
+**为什么**：`matches()` 用 **and** 串联五个字段，少一个就会「每分钟都跑」。
+更重要的是——实验暴露了一处**真实错位**：cron 惯例 0=周日，而代码用 `weekday() % 7`
+（Python 是周一=0…周日=6，`%7` 恒等）。于是 `1-5` 实际命中**周二至周六**，`0 9 * * 0`
+（意图周日）**永远不命中**。改法是 `(dow - 1) % 7` 或 `isoweekday() % 7`。
+
+### 实验 2：非法 cron 逐条被拦下
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 2
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 解析 5 条非法表达式（字段数 / 越界 / 步长为 0 / 范围倒置） |
+| 期望现象 | 全部抛 `CronError`，且错误信息具体到原因 |
+| 实测 | 5/5 被拦：`4 个字段`、`取值越界：[60]`、`步长非法：*/0`、`范围起止倒置：5-2` |
+
+**为什么**：下一章把 cron 交给大模型填。模型填错时，**能把错误原因回传，它才可能下一轮改对**；只回一句「格式错误」等于让它瞎猜。
+
+### 实验 3：分钟级幂等
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 3
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 同一时刻触发两次 `run_due` |
+| 期望现象 | 第一次执行 1 个，第二次为空，`run_count` 只加 1 |
+| 实测 | 第一次 `['整点心跳 → ping:整点心跳']`；第二次空；`run_count=1` |
+
+**为什么**：幂等靠 `last_run != now.strftime("%Y-%m-%d %H:%M")`——**按分钟字符串比对**。tick 抖动、进程重启、手动再调，只要还在同一分钟就不重复执行。去掉它，任务重启后补跑一遍，报表出两份。
+
+### 实验 4：持久化原子写不留残留
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 4
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 连续 upsert 后检查目录内容与回读结果 |
+| 期望现象 | 只剩 `jobs.json`，无 `.tmp` 残留；回读任务数正确 |
+| 实测 | 目录 `['jobs.json']`；回读 2 个任务 |
+
+**为什么**：`save()` 先写 `jobs.tmp` 再 `os.replace(tmp, path)`——同文件系统内**原子**：要么旧、要么新，绝不半截。改成直接 `write_text`，进程写一半被杀，`load_all()` 就 `JSONDecodeError`——**一次崩溃丢掉全部任务**。
+
+### 实验 5：慢任务超时不拖垮整轮
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 5
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 一个 handler 睡 5s、超时设 0.2s，与快任务同轮执行 |
+| 期望现象 | 慢任务 `timeout`、快任务 `ok`，整轮都跑完 |
+| 实测 | `慢任务 → timeout（超过 0.2s）`；`快任务 → ok` |
+
+**为什么**：`_run_one` 用 `asyncio.wait_for(handler(job), timeout=...)` 把每个任务单独包住，超时与异常都只改这个任务的状态。反面写法是「顺序 await，第一个卡住后面全等着」。
+
+### 实验 6：并发上限压住瞬时并行
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 6
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 6 个任务同时到期，`max_concurrency=2` |
+| 期望现象 | 观测到的并发峰值为 2，6 个任务全部完成 |
+| 实测 | 峰值 `2`、完成 `6` |
+
+**为什么**：`run_due` 用 `asyncio.gather` 并发，但每个 `execute` 先过 `asyncio.Semaphore(max_concurrency)`。不限并发，一次 tick 里几百个任务同时开文件/连库，句柄与内存会顶到上限。
+
+### 实验 7：三层状态可观测且落盘
+
+```bash
+python -m chapters.ch21_cron_tool_part1.experiments --exp 7
+```
+
+| 项 | 值 |
+| --- | --- |
+| 改了什么 | 新建任务后检查状态字段与落盘字段 |
+| 期望现象 | 初始为 `never` / `None`，且状态字段确实写进 JSON |
+| 实测 | `last_status='never'`、`last_run=None`；落盘 10 个字段 |
+
+**为什么**：`last_status` 从 `never` 起，跑过变 `ok` / `timeout` / `failed`，三种结局可分辨。状态要**落盘**——重启后你要能看出「这个任务昨天到底跑没跑」；只存内存，一次发布后所有任务都像「从没跑过」。
+
+
+### 实验 1：把幂等判断去掉，看重复执行
+
+打开 `scheduler.py`，把 `run_due()` 里的 `and job.last_run != now.strftime("%Y-%m-%d %H:%M")`
+删掉，重跑。
+你会看到"幂等验证"那行的结果**从空列表变成又执行了一遍**——
+同一分钟内任务被跑了两次。**tick 抖动、进程重启都会命中这个分支**，这就是幂等的价值。
+
+### 实验 2：写一个非法 cron，看是否被拦住
+
+打开 `scheduler.py`，把演示任务的 cron 从 `"0 * * * *"` 改成 `"0 * * *"`（只有 4 个字段），重跑。
+你会看到 `logger.warning("任务 %s 的 cron 非法：...")` 打出**"cron 需要 5 个字段"**，
+该任务被跳过、**其它任务照常执行**。非法配置不应该让整个调度器起不来。
+
+### 实验 3：让某个 handler 超时
+
+打开 `scheduler.py` 的 `demo_handlers()`，在 `ping()` 里加 `await asyncio.sleep(20)`，
+把 `Scheduler(timeout=10.0)`（或用默认）保持不动，重跑。
+你会看到该任务的 `last_status` 变成 **`timeout`**、`last_error` 是 `超过 10.0s`，
+而**另一个任务的状态仍是 `ok`**——`asyncio.wait_for` + 逐任务 try 保证了隔离。
+
+### 实验 4：把周字段写成 7
+
+在 `CronExpr.parse()` 里把 `dow.replace("7", "0")` 改成 `dow`，然后注册一个 `0 0 * * 7`
+的任务（周日 0 点），重跑。
+你会看到 `CronField.parse(dow, minimum=0, maximum=6)` **直接抛 `CronError`**——
+7 越界。**这是最隐蔽的跨平台差异**：有的 cron 实现接受 7=周日，本实现显式兼容。
+
+### 实验 5：把持久化改成非原子写
+
+打开 `JsonJobStore.save()`，把"写临时文件 + `os.replace`"改成直接
+`self.path.write_text(...)`，然后在一个任务运行中途 Ctrl-C 打断，重跑。
+你会看到 `jobs.json` 可能**只剩半截 JSON**，`load_all()` 直接 `JSONDecodeError`——
+**任务全丢**。`os.replace` 的原子性就是为了防这个。
+
+## 本章的工程化取舍
+
+| 常见做法 | 本章做法 | 收益 |
+| --- | --- | --- |
+| 框架装饰器一把梭 | 自研解析 + 存储 + 循环 + 执行 | 机制透明，才能 Tool 化 |
+| 无持久化 | JSON 原子写 | 重启不丢任务 |
+| 无幂等 | 分钟级去重 + 状态记录 | 抖动/重启不重复执行 |
+| 无超时重试 | 单任务超时 + 重试计数 | 慢任务不拖垮调度 |
+| 无并发控制 | `gather` + 信号量 | 任务多了也不炸 |
+
+## 最佳实践清单
+
+- **cron 解析要缓存**：每分钟解析一次而不是每 tick。
+- **持久化要原子**：临时文件 + `os.replace`。
+- **执行要隔离**：单任务超时，异常降级为状态记录。
+- **幂等要内建**：同一周期只跑一次。
+- **状态可观测**：`last_run` / `last_status` / `last_error` 三件套。
+
+## 常见坑
+
+1. **时区不一致**：存储用 UTC，展示用本地，cron 明确时区。
+2. **周字段 0 与 7**：都是周日，解析要兼容。
+3. **任务执行时间超过周期**：要么跳过本次，要么并发，必须二选一。
+4. **`sleep(60)` 漂移**：对齐到下一分钟边界，而不是固定 sleep。
+
+## 延伸练习
+
+1. 增加"错过补偿"策略：进程重启后是否补跑。
+2. 把 `JsonJobStore` 换成 SQLite，对比原子性与查询能力。
+3. 给任务加 `timeout` 与 `max_retries` 字段，验证失败重试路径。
+
+## 小结
+
+调度器的复杂度不在"定时"，而在**可靠性**：不丢、不重、可观测。
+下一章把这套能力包装成大模型可以调用的 Tool。

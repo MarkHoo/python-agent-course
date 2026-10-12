@@ -1,0 +1,32 @@
+# 环境与密钥
+.env
+.venv/
+venv/
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# 运行时数据（章节脚本产出的临时文件）
+data/
+# 例外：静态站点的构建产物需要随仓库发布，否则 clone 后 site/ 打不开
+!site/data/
+tmp/
+workspace/
+*.log
+*.sqlite3
+chroma/
+
+# 覆盖率产物
+.coverage
+.coverage.*
+htmlcov/
+
+# 章节脚本在章节目录下产生的 workspace（ch21 / ch23）
+chapters/*/workspace/

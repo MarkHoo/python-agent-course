@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent 全栈开发教程 · Python 版</title>
+<meta name="description" content="58 章、可独立完成、离线可跑的 AI Agent 全栈开发教程（Python 3.12 + LangChain + Pydantic v2 + asyncio）">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<!-- 顶部工具栏 -->
+<header class="topbar">
+  <div class="topbar-left">
+    <button id="btnMenu" class="icon-btn" title="目录" aria-label="打开目录">☰</button>
+    <a class="brand" href="#home">
+      <span class="brand-title">AI Agent 全栈开发</span>
+      <span class="brand-sub">Python · LangChain · RAG · Agent</span>
+    </a>
+  </div>
+  <div class="search-box">
+    <span class="search-icon">🔍</span>
+    <input id="searchInput" type="text" placeholder="搜索全书内容…（支持空格分隔多个关键词）" autocomplete="off">
+    <span id="searchShortcut" class="search-shortcut">Ctrl+K</span>
+  </div>
+  <div class="topbar-right">
+    <button id="btnFontDown" class="icon-btn" title="减小字号" aria-label="减小字号">A−</button>
+    <button id="btnFontUp" class="icon-btn" title="增大字号" aria-label="增大字号">A+</button>
+    <button id="btnTheme" class="icon-btn" title="切换深色/浅色主题" aria-label="切换主题">🌙</button>
+    <button id="btnGuideTop" class="icon-btn" title="工程交接说明" aria-label="工程交接说明">📐</button>
+  </div>
+</header>
+
+<!-- 搜索面板 -->
+<div id="searchPanel" class="search-panel hidden">
+  <div id="searchResults" class="search-results"></div>
+  <div id="searchEmpty" class="search-empty hidden">没有找到匹配内容，试试其他关键词</div>
+</div>
+
+<!-- 阅读进度条 -->
+<div id="progressBar" class="progress-bar"></div>
+
+<div class="layout">
+  <!-- 侧边栏：目录 -->
+  <nav id="sidebar" class="sidebar">
+    <div class="sidebar-head">目录</div>
+    <ul id="tocList" class="toc-list"></ul>
+  </nav>
+  <div id="sidebarMask" class="sidebar-mask"></div>
+
+  <!-- 主内容区 -->
+  <main id="main" class="main">
+    <div id="homeView" class="home-view">
+      <div class="home-card">
+        <h1>《AI Agent 全栈开发教程 · Python 版》</h1>
+        <p class="home-desc">58 章、可独立完成的 AI Agent 全栈开发教程 · 面向想转型 Agent 开发的后端/全栈工程师</p>
+        <p class="home-version">技术栈基准：Python 3.12 + LangChain Python + Pydantic v2 + asyncio · 全站离线可跑（无 API Key 也能把 79 个入口跑一遍）</p>
+        <div class="home-actions">
+          <button id="btnStart" class="btn-primary">📖 开始阅读（第 1 章）</button>
+          <button id="btnGuide" class="btn-secondary">📐 工程交接说明</button>
+          <button id="btnSearch" class="btn-secondary">🔍 搜索全书</button>
+        </div>
+        <div class="home-features">
+          <span>✓ 全文搜索（Ctrl+K）</span><span>✓ 目录导航</span><span>✓ 代码高亮与一键复制</span><span>✓ 深浅主题</span><span>✓ 字号调节</span><span>✓ 阅读进度</span>
+        </div>
+      </div>
+      <div id="homeToc" class="home-toc"></div>
+    </div>
+    <article id="articleView" class="article-view hidden">
+      <div id="articleContent" class="article-content markdown-body"></div>
+      <div class="article-nav">
+        <button id="btnPrev" class="nav-btn">← 上一章</button>
+        <button id="btnNext" class="nav-btn">下一章 →</button>
+      </div>
+    </article>
+  </main>
+</div>
+
+<button id="btnTop" class="btn-top hidden" title="回到顶部">↑</button>
+
+<!-- 数据（由 tools/build_site.py 生成，file:// 直接打开也能用） -->
+<script src="data/README.js"></script>
+<script src="data/ch01_transition_story.js"></script>
+<script src="data/ch02_course_roadmap.js"></script>
+<script src="data/ch03_what_to_learn.js"></script>
+<script src="data/ch04_tool_basics.js"></script>
+<script src="data/ch05_mini_cursor.js"></script>
+<script src="data/ch06_mcp_server.js"></script>
+<script src="data/ch07_reuse_mcp.js"></script>
+<script src="data/ch08_rag_vector.js"></script>
+<script src="data/ch09_loader_splitter.js"></script>
+<script src="data/ch10_splitter_deep.js"></script>
+<script src="data/ch11_milvus.js"></script>
+<script src="data/ch12_milvus_rag.js"></script>
+<script src="data/ch13_memory_strategy.js"></script>
+<script src="data/ch14_structured_output.js"></script>
+<script src="data/ch15_output_parser_practice.js"></script>
+<script src="data/ch16_prompt_template.js"></script>
+<script src="data/ch17_runnable.js"></script>
+<script src="data/ch18_lcel_practice.js"></script>
+<script src="data/ch19_langchain_summary.js"></script>
+<script src="data/ch20_sse_stream.js"></script>
+<script src="data/ch21_cron_tool_part1.js"></script>
+<script src="data/ch22_cron_tool_part2.js"></script>
+<script src="data/ch23_asr_tts.js"></script>
+<script src="data/ch24_agui_protocol.js"></script>
+<script src="data/ch25_langgraph.js"></script>
+<script src="data/ch26_agentic_rag.js"></script>
+<script src="data/ch27_docker_compose.js"></script>
+<script src="data/ch28_elasticsearch.js"></script>
+<script src="data/ch29_hybrid_search.js"></script>
+<script src="data/ch30_neo4j_graphrag.js"></script>
+<script src="data/ch31_langsmith.js"></script>
+<script src="data/ch32_deepagents.js"></script>
+<script src="data/ch33_deep_research.js"></script>
+<script src="data/ch34_postgresql.js"></script>
+<script src="data/ch35_redis_memory.js"></script>
+<script src="data/ch36_mem0.js"></script>
+<script src="data/ch37_fastapi_backend.js"></script>
+<script src="data/ch38_object_storage.js"></script>
+<script src="data/ch39_multimodal_upload.js"></script>
+<script src="data/ch40_rabbitmq.js"></script>
+<script src="data/ch41_langfuse.js"></script>
+<script src="data/ch42_transformer.js"></script>
+<script src="data/ch43_training_inference.js"></script>
+<script src="data/ch44_resume_library.js"></script>
+<script src="data/ch45_resume_library_2.js"></script>
+<script src="data/ch46_interview_rag.js"></script>
+<script src="data/ch47_resume_rag.js"></script>
+<script src="data/ch48_kb_project_intro.js"></script>
+<script src="data/ch49_kb_database_design.js"></script>
+<script src="data/ch50_document_parsing.js"></script>
+<script src="data/ch51_async_rag_pipeline.js"></script>
+<script src="data/ch52_fulltext_search.js"></script>
+<script src="data/ch53_neo4j_extraction.js"></script>
+<script src="data/ch54_document_audit.js"></script>
+<script src="data/ch55_auth_flow.js"></script>
+<script src="data/ch56_user_module.js"></script>
+<script src="data/ch57_rbac.js"></script>
+<script src="data/ch58_highlight_graph_search.js"></script>
+<script src="data/HANDOVER.js"></script>
+<script src="data/CHAPTER_GUIDE.js"></script>
+<script src="data/ENGINEERING_BASELINE.js"></script>
+<script src="data/TROUBLESHOOTING.js"></script>
+<script src="data/CONTRIBUTING.js"></script>
+
+<script src="js/markdown.js"></script>
+<script src="js/highlight.js"></script>
+<script src="js/search.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
